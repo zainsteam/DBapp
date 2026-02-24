@@ -4,7 +4,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { startNextRunJob } from "../jobs/nextRunScheduler.js";
-import { startRemoveTagCron } from "../jobs/cronRemoveTag.js";
+// import { startRemoveTagCron } from "../jobs/cronRemoveTag.js";
 
 export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
@@ -15,7 +15,7 @@ export const loader = async ({ request }) => {
 
   return null;
 };
- 
+
 export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const color = ["Red", "Orange", "Yellow", "Green"][

@@ -2,7 +2,7 @@
 
 client_id = "1df5153a13054d14998f6f0ad2e7bdb5"
 name = "dreambazaarauto"
-application_url = "https://rules-logan-aviation-athletes.trycloudflare.com"
+application_url = "https://tremendous-chart-spotlight-photograph.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,5 +19,5 @@ use_legacy_install_flow = false
 
 [auth]
 redirect_urls = [
-  "https://rules-logan-aviation-athletes.trycloudflare.com/api/auth"
+  "https://tremendous-chart-spotlight-photograph.trycloudflare.com/api/auth"
 ]
