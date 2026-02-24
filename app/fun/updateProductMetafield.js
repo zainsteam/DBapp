@@ -14,10 +14,33 @@ export async function updateProductMetafield(
   productGid,
   { namespace, key, type, value }
 ) {
+  return await updateProductMetafields(admin, [
+    {
+      ownerId: productGid,
+      namespace,
+      key,
+      type,
+      value,
+    },
+  ]);
+}
+
+/**
+ * Bulk set metafields across one/many products.
+ *
+ * @param {object} admin - Shopify Admin API client
+ * @param {Array<{ownerId: string, namespace: string, key: string, type: string, value: string}>} metafields
+ * @returns {Promise<boolean>}
+ */
+export async function updateProductMetafields(admin, metafields) {
   try {
+    if (!Array.isArray(metafields) || metafields.length === 0) {
+      return true;
+    }
+
     const response = await admin.graphql(
       `#graphql
-      mutation updateProductMetafield($metafields: [MetafieldsSetInput!]!) {
+      mutation updateProductMetafields($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           metafields {
             id
@@ -34,15 +57,7 @@ export async function updateProductMetafield(
       }`,
       {
         variables: {
-          metafields: [
-            {
-              ownerId: productGid,
-              namespace,
-              key,
-              type,
-              value,
-            },
-          ],
+          metafields,
         },
       }
     );
@@ -59,9 +74,7 @@ export async function updateProductMetafield(
       return false;
     }
 
-    console.log(
-      `[PRODUCT METAFIELD] Updated ${namespace}.${key} → ${value}`
-    );
+    console.log(`[PRODUCT METAFIELD] Updated ${metafields.length} metafield(s)`);
     return true;
   } catch (err) {
     console.error("[PRODUCT METAFIELD UPDATE ERROR]", err?.message || err);

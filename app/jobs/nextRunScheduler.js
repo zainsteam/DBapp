@@ -1,305 +1,162 @@
 import schedule from "node-schedule";
+import PQueue from "p-queue";
 import { updateNextRunMetaobject } from "../fun/updateMetaobject.js";
-import { getDraftProducts } from "../fun/getdraftproducts.js";
-import { assignNextProductsTag } from "../fun/updatetag.js";
-import { updateProductMetafield } from "../fun/updateProductMetafield.js";
 
-const METAOBJECT_GID = "gid://shopify/Metaobject/247407607989";
+const METAOBJECT_GID = "gid://shopify/Metaobject/199390101750";
+const ACTIVE_LIMIT = 3000;
+const BATCH_SIZE = 50;       // Smaller batch to avoid throttling
+const CONCURRENCY = 3;       // Fewer concurrent requests
+const DELAY_BETWEEN_BATCHES = 500; // ms delay between batches
 
-/**
- * Get all draft products from the store with pagination
- *
- * @param {object} admin - Shopify Admin API client
- * @returns {Promise<Array>} Array of all draft product edges
- */
-async function getAllDraftProducts(admin) {
-  const status = "DRAFT";
-  let allEdges = [];
-  let cursor = null;
+/* -------------------------------
+   Fetch all products with cursor
+-------------------------------- */
+async function getAllProducts(admin, afterCursor = null) {
+  let products = [];
+  let cursor = afterCursor;
   let hasNextPage = true;
 
-  console.log("[JOB] Fetching all draft products...");
-
   while (hasNextPage) {
-    const { edges, pageInfo } = await getDraftProducts(
-      admin,
-      { first: 100, after: cursor },
-      status
-    );
-
-    allEdges.push(...edges);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-
-    console.log(`[JOB] Fetched ${allEdges.length} draft products so far...`);
-  }
-
-  console.log(`[JOB] Total draft products fetched: ${allEdges.length}`);
-  return allEdges;
-}
-
-/**
- * Get all active products with a specific tag from the store with pagination
- *
- * @param {object} admin - Shopify Admin API client
- * @param {string} tag - Tag to filter by
- * @returns {Promise<Array>} Array of all product edges
- */
-async function getActiveProductsWithTag(admin, tag) {
-  // Query for ACTIVE products with the specified tag
-  const status = `ACTIVE tag:${tag}`;
-  let allEdges = [];
-  let cursor = null;
-  let hasNextPage = true;
-
-  console.log(`[JOB] Fetching all active products with tag "${tag}"...`);
-
-  while (hasNextPage) {
-    const { edges, pageInfo } = await getDraftProducts(
-      admin,
-      { first: 100, after: cursor },
-      status
-    );
-
-    allEdges.push(...edges);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-
-    console.log(`[JOB] Fetched ${allEdges.length} active products with tag "${tag}" so far...`);
-  }
-
-  console.log(`[JOB] Total active products with tag "${tag}" fetched: ${allEdges.length}`);
-  return allEdges;
-}
-
-/**
- * Get all draft products with a specific tag from the store with pagination
- *
- * @param {object} admin - Shopify Admin API client
- * @param {string} tag - Tag to filter by
- * @returns {Promise<Array>} Array of all product edges
- */
-async function getDraftProductsWithTag(admin, tag) {
-  // Query for DRAFT products with the specified tag
-  const status = `DRAFT tag:${tag}`;
-  let allEdges = [];
-  let cursor = null;
-  let hasNextPage = true;
-
-  console.log(`[JOB] Fetching all draft products with tag "${tag}"...`);
-
-  while (hasNextPage) {
-    const { edges, pageInfo } = await getDraftProducts(
-      admin,
-      { first: 100, after: cursor },
-      status
-    );
-
-    allEdges.push(...edges);
-    hasNextPage = pageInfo.hasNextPage;
-    cursor = pageInfo.endCursor;
-
-    console.log(`[JOB] Fetched ${allEdges.length} draft products with tag "${tag}" so far...`);
-  }
-
-  console.log(`[JOB] Total draft products with tag "${tag}" fetched: ${allEdges.length}`);
-  return allEdges;
-}
-
-/**
- * Get product metafield value
- *
- * @param {object} admin - Shopify Admin API client
- * @param {string} productGid - Product GID
- * @param {string} namespace - Metafield namespace
- * @param {string} key - Metafield key
- * @returns {Promise<number|null>} Current metafield value or null if not found
- */
-async function getProductMetafieldValue(admin, productGid, namespace, key) {
-  try {
     const response = await admin.graphql(
-      `#graphql
-      query getProductMetafield($id: ID!, $namespace: String!, $key: String!) {
-        product(id: $id) {
-          id
-          metafield(namespace: $namespace, key: $key) {
-            id
-            namespace
-            key
-            value
-            type
+      `
+        query ($first: Int!, $after: String) {
+          products(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                status
+                title
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
-      }`,
-      {
-        variables: {
-          id: productGid,
-          namespace,
-          key,
-        },
-      }
+      `,
+      { variables: { first: 250, after: cursor } }
     );
 
-    const result = response?.body?.data?.product?.metafield || response?.data?.product?.metafield;
+    const json = await response.json();
 
-    if (result?.value) {
-      return parseInt(result.value, 10) || 0;
+    if (json.errors) {
+      console.error("[GRAPHQL ERRORS in getAllProducts]:", json.errors);
+      break;
     }
 
-    return 0; // Default to 0 if metafield doesn't exist
-  } catch (error) {
-    console.error(`[JOB] Error fetching metafield for ${productGid}:`, error?.message || error);
-    return 0;
+    const { edges, pageInfo } = json.data.products;
+    products.push(...edges.map(e => e.node));
+
+    cursor = pageInfo.endCursor;
+    hasNextPage = pageInfo.hasNextPage;
+
+    await new Promise(r => setTimeout(r, 100)); // Rate limit buffer
   }
+
+  return { products, lastCursor: cursor };
 }
 
-/**
- * Increment product "assign" metafield by 1
- *
- * @param {object} admin - Shopify Admin API client
- * @param {string} productGid - Product GID
- * @param {string} namespace - Metafield namespace (default: "custom")
- * @param {string} key - Metafield key (default: "assign")
- * @returns {Promise<boolean>} Success status
- */
-async function incrementAssignMetafield(admin, productGid, namespace = "custom", key = "assign") {
+/* -------------------------------
+   Update a single product with retry
+-------------------------------- */
+async function updateProduct(admin, product, retries = 3) {
   try {
-    // Get current value
-    const currentValue = await getProductMetafieldValue(admin, productGid, namespace, key);
-    const newValue = (currentValue || 0) + 1;
+    const response = await admin.graphql(
+      `mutation ($input: ProductUpdateInput!) {
+        productUpdate(product: $input) {
+          product { id status }
+          userErrors { field message }
+        }
+      }`,
+      { variables: { input: product } }
+    );
 
-    // Update metafield
-    const success = await updateProductMetafield(admin, productGid, {
-      namespace,
-      key,
-      type: "number_integer",
-      value: newValue.toString(),
-    });
+    const json = await response.json();
 
-    if (success) {
-      console.log(`[JOB] Incremented ${namespace}.${key} for ${productGid}: ${currentValue} → ${newValue}`);
+    if (json.errors) {
+      console.error("[GRAPHQL ERRORS]", json.errors);
+      return null;
     }
 
-    return success;
+    const result = json?.data?.productUpdate;
+
+    if (result?.userErrors?.length) {
+      console.error("[PRODUCT UPDATE ERRORS]", result.userErrors);
+    }
+
+    return result;
   } catch (error) {
-    console.error(`[JOB] Error incrementing metafield for ${productGid}:`, error?.message || error);
-    return false;
+    if (retries > 0 && error.message.includes("429")) {
+      await new Promise(r => setTimeout(r, 2000));
+      return updateProduct(admin, product, retries - 1);
+    }
+    console.error(`[PRODUCT UPDATE ERROR] ${product.id}:`, error?.message || error);
+    return null;
   }
 }
 
-/**
- * Starts the scheduled job once per process
- *
- * @param {object} admin - Shopify Admin API client
- */
-export function startNextRunJob(admin) {
-  if (global.nextRunJobStarted) {
-    return;
+/* -------------------------------
+   Batch update with throttling
+-------------------------------- */
+async function batchUpdateProducts(admin, updates) {
+  const queue = new PQueue({ concurrency: CONCURRENCY });
+
+  for (let i = 0; i < updates.length; i += BATCH_SIZE) {
+    const batch = updates.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(p => queue.add(() => updateProduct(admin, p))));
+    console.log(`[JOB] Updated batch ${i + 1}-${i + batch.length}`);
+    await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
   }
+}
 
-  global.nextRunJobStarted = true;
+/* -------------------------------
+   Scheduler
+-------------------------------- */
+export function startNextRunJob(admin) {
+  if (global.rotationJobStarted) return;
+  global.rotationJobStarted = true;
 
-  console.log("[JOB] Starting nextRun scheduler");
+  console.log("[JOB] Product rotation scheduler started");
 
-  // Every second
-  schedule.scheduleJob("0 */10 * * * *", async () => {
-    // Job lock: prevent overlapping runs
-    if (global.nextRunJobRunning) {
-      console.log("[JOB] Previous job still running, skipping this run.");
+  // Runs every 2 minutes (adjust as needed)
+  schedule.scheduleJob("0 */2 * * * *", async () => {
+    if (global.rotationJobRunning) {
+      console.log("[JOB] Previous run still active, skipping.");
       return;
     }
 
-    global.nextRunJobRunning = true;
+    global.rotationJobRunning = true;
 
     try {
-      console.log("[JOB] Tick", new Date().toISOString());
+      console.log("[JOB] Rotation started", new Date().toISOString());
 
-      // First, get all draft products
-      const draftProductEdges = await getAllDraftProducts(admin);
+      // Fetch all products
+      const { products: allProducts } = await getAllProducts(admin);
 
-      // Extract product nodes from edges
-      const draftProducts = draftProductEdges.map(edge => edge.node);
+      const activeProducts = allProducts.filter(p => p.status === "ACTIVE");
+      const draftProducts = allProducts.filter(p => p.status === "DRAFT");
 
-      // Add "nextproducts" tag to each draft product
-      if (draftProducts.length > 0) {
-        console.log(`[JOB] Adding "nextproducts" tag to ${draftProducts.length} draft products...`);
-        const updatedProducts = await assignNextProductsTag(
-          admin,
-          draftProducts,
-          "nextproducts",
-          null, // No status change
-          25,   // Batch size
-          "DRAFT" // Filter status
-        );
-        console.log(`[JOB] Successfully tagged ${updatedProducts.length} products with "nextproducts"`);
+      console.log(`[JOB] ACTIVE: ${activeProducts.length}, DRAFT: ${draftProducts.length}`);
+
+      // Prepare update payloads
+      const deactivatePayload = activeProducts.map(p => ({ id: p.id, status: "DRAFT" }));
+      const activatePayload = draftProducts.slice(0, ACTIVE_LIMIT).map(p => ({ id: p.id, status: "ACTIVE" }));
+      const combinedUpdates = [...deactivatePayload, ...activatePayload];
+
+      if (combinedUpdates.length > 0) {
+        console.log(`[JOB] Updating ${combinedUpdates.length} products...`);
+        await batchUpdateProducts(admin, combinedUpdates);
       }
 
-      // Get active products with "currentproducts" tag and make them draft
-      const activeProductEdges = await getActiveProductsWithTag(admin, "currentproducts");
-      const activeProducts = activeProductEdges.map(edge => edge.node);
+      // Update last run timestamp in metaobject
+      await updateNextRunMetaobject(admin, METAOBJECT_GID, { lastRun: new Date().toISOString() });
 
-      if (activeProducts.length > 0) {
-        console.log(`[JOB] Making ${activeProducts.length} active products with "currentproducts" tag draft and replacing tag with "no-rotation"...`);
-        // Replace "currentproducts" tag with "no-rotation" and update status to DRAFT
-        const updatedToDraft = await assignNextProductsTag(
-          admin,
-          activeProducts,
-          "no-rotation", // New tag to add
-          "DRAFT", // Update status to DRAFT
-          25,   // Batch size
-          "ACTIVE", // Filter status
-          "currentproducts" // Tag to replace
-        );
-        console.log(`[JOB] Successfully made ${updatedToDraft.length} products draft and replaced "currentproducts" with "no-rotation"`);
-      }
-
-      // Get draft products with "nextproducts" tag and activate them
-      const nextProductEdges = await getDraftProductsWithTag(admin, "nextproducts");
-      const nextProducts = nextProductEdges.map(edge => edge.node);
-
-      if (nextProducts.length > 0) {
-        console.log(`[JOB] Activating ${nextProducts.length} draft products with "nextproducts" tag...`);
-        // Activate products with "nextproducts" tag and replace tag with "currentproducts"
-        const activatedProducts = await assignNextProductsTag(
-          admin,
-          nextProducts,
-          "currentproducts", // New tag to add
-          "ACTIVE", // Update status to ACTIVE
-          25,   // Batch size
-          "DRAFT", // Filter status
-          "nextproducts" // Tag to replace
-        );
-        console.log(`[JOB] Successfully activated ${activatedProducts.length} products and replaced "nextproducts" with "currentproducts"`);
-
-        // Increment "assign" metafield for each activated product
-        if (activatedProducts.length > 0) {
-          console.log(`[JOB] Incrementing "assign" metafield for ${activatedProducts.length} activated products...`);
-          let successCount = 0;
-          for (const product of activatedProducts) {
-            const productGid = product.id.toString().startsWith("gid://")
-              ? product.id
-              : `gid://shopify/Product/${product.id}`;
-
-            const success = await incrementAssignMetafield(admin, productGid);
-            if (success) {
-              successCount++;
-            }
-            // Rate-limit safety
-            await new Promise((r) => setTimeout(r, 150));
-          }
-          console.log(`[JOB] Successfully incremented "assign" metafield for ${successCount} products`);
-        }
-      }
-
-      // Then update the shop metaobject
-      await updateNextRunMetaobject(admin, METAOBJECT_GID);
-
-      console.log(`[JOB] Completed - Processed ${draftProducts.length} draft products, ${activeProducts.length} active products, and ${nextProducts.length} next products`);
+      console.log(`[JOB] Completed successfully — ACTIVE=${activatePayload.length}`);
     } catch (error) {
-      console.error("[JOB] Error in scheduled job:", error);
+      console.error("[JOB] Rotation failed:", error);
     } finally {
-      // Release lock
-      global.nextRunJobRunning = false;
+      global.rotationJobRunning = false;
     }
   });
 }

@@ -5,7 +5,7 @@
  *
  * @param {object} admin - Shopify Admin API client
  * @param {Array} products - Array of products (id, tags, status required)
- * @param {string} tag - Tag to add
+ * @param {string|string[]} tag - Tag(s) to add (single tag or array)
  * @param {"ACTIVE"|"DRAFT"} updatedStatus - Optional new status
  * @param {number} batchSize
  * @param {"ACTIVE"|"DRAFT"|"ALL"} filterStatus - Which products to process
@@ -20,11 +20,16 @@ export async function assignNextProductsTag(
   updatedStatus,
   batchSize = 25,
   filterStatus,
-  replaceTag = null
+  replaceTag = null,
+  concurrency = 3,
+  throttleMs = 100
 ) {
 
-  console.log(tag, " ", updatedStatus, " ", filterStatus)
+  const tagsToAdd = Array.isArray(tag) ? tag.filter(Boolean) : [tag].filter(Boolean);
+  console.log(tagsToAdd.length ? tagsToAdd.join(", ") : tag, " ", updatedStatus, " ", filterStatus);
   batchSize = Number(batchSize) || 25;
+  concurrency = Math.max(1, Number(concurrency) || 1);
+  throttleMs = Math.max(0, Number(throttleMs) || 0);
   const updatedProducts = [];
 
   if (!Array.isArray(products) || products.length === 0) {
@@ -45,47 +50,58 @@ export async function assignNextProductsTag(
         (p) => p.status === filterStatus
       );
 
-  for (let i = 0; i < filteredProducts.length; i += batchSize) {
-    const batch = filteredProducts.slice(i, i + batchSize);
-    const batchIndex = Math.floor(i / batchSize) + 1;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    // console.log(`Processing batch ${batchIndex}: ${batch.length} products`);
+  const tagsToArray = (tags) =>
+    Array.isArray(tags)
+      ? tags.filter(Boolean)
+      : typeof tags === "string"
+        ? tags.split(",").map((t) => t.trim()).filter(Boolean)
+        : [];
 
-    for (const product of batch) {
-      // Normalize tags
-      const currentTags = Array.isArray(product.tags)
-        ? [...product.tags]
-        : typeof product.tags === "string"
-          ? product.tags.split(",").map(t => t.trim()).filter(Boolean)
-          : [];
+  const sameTagSet = (a, b) => {
+    const aSet = new Set(a);
+    const bSet = new Set(b);
+    if (aSet.size !== bSet.size) return false;
+    for (const v of aSet) if (!bSet.has(v)) return false;
+    return true;
+  };
 
-      // If replacing a tag, remove the old tag and add the new one
-      if (replaceTag) {
-        const oldTagIndex = currentTags.indexOf(replaceTag);
-        if (oldTagIndex !== -1) {
-          currentTags.splice(oldTagIndex, 1);
-        }
-        // Add new tag if it doesn't exist
-        if (!currentTags.includes(tag) && tag) {
-          currentTags.push(tag);
-        }
-      } else {
-        // If tag already exists and no status update is needed, skip
-        if (currentTags.includes(tag) && !updatedStatus) {
-          continue;
-        }
+  async function updateSingleProduct(product) {
+    const originalTags = tagsToArray(product.tags);
+    const currentTags = [...originalTags];
 
-        // Add tag if it doesn't exist
-        if (!currentTags.includes(tag) && tag) {
-          currentTags.push(tag);
-        }
+    // If replacing a tag, remove the old tag and add the new one(s)
+    if (replaceTag) {
+      const oldTagIndex = currentTags.indexOf(replaceTag);
+      if (oldTagIndex !== -1) {
+        currentTags.splice(oldTagIndex, 1);
       }
+      for (const t of tagsToAdd) {
+        if (!currentTags.includes(t)) currentTags.push(t);
+      }
+    } else {
+      // If all tags already exist and no status update, skip
+      const allPresent = tagsToAdd.length > 0 && tagsToAdd.every((t) => currentTags.includes(t));
+      if (allPresent && !updatedStatus) {
+        return null;
+      }
+      for (const t of tagsToAdd) {
+        if (!currentTags.includes(t)) currentTags.push(t);
+      }
+    }
 
-      const productGid = toGid(product.id);
+    const tagsChanged = !sameTagSet(originalTags, currentTags);
+    const statusChanged = Boolean(updatedStatus) && updatedStatus !== product.status;
+    if (!tagsChanged && !statusChanged) {
+      return null;
+    }
 
-      try {
-        const response = await admin.graphql(
-          `
+    const productGid = toGid(product.id);
+
+    try {
+      const response = await admin.graphql(
+        `
           mutation updateProduct($product: ProductUpdateInput!) {
             productUpdate(product: $product) {
               product {
@@ -100,44 +116,59 @@ export async function assignNextProductsTag(
             }
           }
           `,
-          {
-            variables: {
-              product: {
-                id: productGid,
-                tags: currentTags,
-                ...(updatedStatus ? { status: updatedStatus } : {}),
-              },
+        {
+          variables: {
+            product: {
+              id: productGid,
+              tags: currentTags,
+              ...(updatedStatus ? { status: updatedStatus } : {}),
             },
-          }
-        );
-
-        const result =
-          response?.body?.data?.productUpdate ??
-          response?.data?.productUpdate;
-
-        if (result?.userErrors?.length) {
-          console.warn(
-            "User errors:",
-            result.userErrors.map(e => e.message)
-          );
-          continue;
+          },
         }
+      );
 
-        updatedProducts.push({
-          ...product,
-          tags: currentTags,
-          status: updatedStatus ?? product.status,
-        });
-      } catch (error) {
-        console.error(
-          "Error updating product:",
-          productGid,
-          error?.message || error
+      const result =
+        response?.body?.data?.productUpdate ??
+        response?.data?.productUpdate;
+
+      if (result?.userErrors?.length) {
+        console.warn(
+          "User errors:",
+          result.userErrors.map(e => e.message)
         );
+        return null;
       }
 
-      // Rate-limit safety
-      await new Promise((r) => setTimeout(r, 150));
+      return {
+        ...product,
+        tags: currentTags,
+        status: updatedStatus ?? product.status,
+      };
+    } catch (error) {
+      console.error(
+        "Error updating product:",
+        productGid,
+        error?.message || error
+      );
+      return null;
+    }
+  }
+
+  for (let i = 0; i < filteredProducts.length; i += batchSize) {
+    const batch = filteredProducts.slice(i, i + batchSize);
+    const batchIndex = Math.floor(i / batchSize) + 1;
+
+    console.log(`Processing batch ${batchIndex}: ${batch.length} products`);
+
+    for (let j = 0; j < batch.length; j += concurrency) {
+      const chunk = batch.slice(j, j + concurrency);
+      const results = await Promise.all(chunk.map(updateSingleProduct));
+      for (const updated of results) {
+        if (updated) updatedProducts.push(updated);
+      }
+
+      // Rate-limit safety (applies per concurrent chunk)
+      if (throttleMs > 0) await sleep(throttleMs);
     }
   }
 
