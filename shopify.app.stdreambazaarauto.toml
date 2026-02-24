@@ -2,7 +2,7 @@
 
 client_id = "113cba7c557217002825473627fa42d8"
 name = "STdreambazaarauto"
-application_url = "https://example.com"
+application_url = "https://constructed-innovation-prefer-reuters.trycloudflare.com"
 embedded = true
 
 [build]
@@ -14,7 +14,11 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_metaobjects,read_products,write_metaobjects,write_products"
+scopes = "read_metaobjects,write_metaobjects,read_products,write_products"
+optional_scopes = [ ]
+use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://constructed-innovation-prefer-reuters.trycloudflare.com/api/auth"
+]
