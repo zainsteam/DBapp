@@ -6,7 +6,7 @@ const METAOBJECT_GID = "gid://shopify/Metaobject/199390101750";
 const ACTIVE_LIMIT = 3000;
 const BATCH_SIZE = 50;       // Smaller batch to avoid throttling
 const CONCURRENCY = 3;       // Fewer concurrent requests
-const DELAY_BETWEEN_BATCHES = 500; // ms delay between batches
+const DELAY_BETWEEN_BATCHES = 200; // ms delay between batches
 
 /* -------------------------------
    Fetch all products with cursor
@@ -51,7 +51,7 @@ async function getAllProducts(admin, afterCursor = null) {
     cursor = pageInfo.endCursor;
     hasNextPage = pageInfo.hasNextPage;
 
-    await new Promise(r => setTimeout(r, 100)); // Rate limit buffer
+    await new Promise(r => setTimeout(r, 150)); // Rate limit buffer
   }
 
   return { products, lastCursor: cursor };
@@ -120,7 +120,7 @@ export function startNextRunJob(admin) {
   console.log("[JOB] Product rotation scheduler started");
 
   // Runs every 2 minutes (adjust as needed)
-  schedule.scheduleJob("0 */2 * * * *", async () => {
+  schedule.scheduleJob("0 0 */3 * * *", async () => {
     if (global.rotationJobRunning) {
       console.log("[JOB] Previous run still active, skipping.");
       return;
