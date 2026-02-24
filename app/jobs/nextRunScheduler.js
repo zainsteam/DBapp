@@ -340,7 +340,7 @@ export function startNextRunJob(admin) {
   rule.minute = 50; // 50 minutes past the hour
   rule.hour = new schedule.Range(5, 23, 3); // 5,8,11,14,17,20,23
 
-  // Runs every 3 hours (adjust as needed)
+  // Runs every 3 hours but specific time (adjust as needed)
   schedule.scheduleJob(rule, async () => {
     // Runs every 3 minutes (adjust as needed)
     // schedule.scheduleJob("0 */3 * * * *", async () => {
