@@ -327,7 +327,7 @@ function pickRandomItems(array, count) {
 /* -------------------------------
    Scheduler
 -------------------------------- */
-export function startNextRunJob(admin) {
+export async function startNextRunJob(admin) {
   if (global.rotationJobStarted) return;
   global.rotationJobStarted = true;
 
